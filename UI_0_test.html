@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>铁塔姿态分析系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCVReady()"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: #f4f7f8; }
+        
+        .video-container { position: relative; width: 100%; aspect-ratio: 16/9; background-color: #0f172a; border-radius: 1rem; overflow: hidden; box-shadow: inset 0 2px 10px rgba(0,0,0,0.2); }
+        .video-container video, .video-container img { width: 100%; height: 100%; object-fit: contain; }
+        .overlay-canvas { position: absolute; top: 0; left: 0; pointer-events: none; width: 100%; height: 100%; }
+        
+        .status-indicator { width: 12px; height: 12px; border-radius: 50%; display: inline-block; box-shadow: 0 0 8px currentColor; }
+        .status-normal { background-color: #10b981; color: #10b981; }
+        .status-warning { background-color: #f59e0b; color: #f59e0b; }
+        .status-danger { background-color: #ef4444; color: #ef4444; }
+        
+        .data-card { transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); border: 1px solid #f1f5f9; }
+        .data-card:hover { transform: translateY(-4px); box-shadow: 0 12px 24px rgba(0,0,0,0.06); border-color: #cbd5e1; }
+        .file-upload-btn input[type="file"] { display: none; }
+        
+        #tower3DContainer { 
+            width: 100%; 
+            height: 400px; 
+            border-radius: 1rem; 
+            overflow: hidden; 
+            background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%); 
+            cursor: grab; 
+            position: relative;
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+        }
+        #tower3DContainer:active { cursor: grabbing; }
+
+        .deg-bubble {
+            position: absolute;
+            top: 2px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #ffffff;
+            font-weight: 900;
+            font-size: 16px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8), 0 0 8px rgba(239, 68, 68, 0.9);
+            z-index: 30;
+        }
+
+        #angleOverlay {
+            position: absolute;
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid #f59e0b;
+            color: #fcd34d;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-weight: 900;
+            font-size: 14px;
+            pointer-events: none;
+            transform: translate(-50%, -100%);
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            z-index: 40;
+        }
+
+        @keyframes alarm-blink {
+            0%, 100% { opacity: 1; background-color: #ef4444; box-shadow: 0 0 12px #ef4444; }
+            50% { opacity: 0.3; background-color: #dc2626; box-shadow: 0 0 4px #dc2626; }
+        }
+        .alarm-flash {
+            animation: alarm-blink 0.8s infinite;
+        }
+    </style>
+</head>
+<body class="min-h-screen">
+    <nav class="bg-gradient-to-r from-slate-900 to-[#0f172a] text-white shadow-lg sticky top-0 z-50 border-b border-slate-800">
+        <div class="container mx-auto px-6 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <div class="bg-blue-600/20 p-2 rounded-lg">
+                        <svg class="w-7 h-7 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                        </svg>
+                    </div>
+                    <h1 class="text-2xl font-black tracking-wide bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-300">铁塔姿态分析系统</h1>
+                </div>
+                <div class="flex items-center space-x-6">
+                    <div class="flex items-center space-x-3 bg-slate-800/80 backdrop-blur px-4 py-2 rounded-full border border-slate-700">
+                        <span class="status-indicator status-danger" id="systemStatus"></span>
+                        <span class="text-sm font-bold tracking-wider" id="statusText">等待后端</span>
+                    </div>
+                    <div class="flex items-center space-x-3 bg-slate-800/80 backdrop-blur px-4 py-2 rounded-full border border-red-700" id="alarmBox">
+                        <span class="status-indicator status-normal" id="alarmLight"></span>
+                        <span class="text-sm font-bold tracking-wider text-slate-400" id="alarmText">无报警</span>
+                    </div>
+                    <button onclick="showSettings()" class="hover:text-blue-400 transition transform hover:scale-110">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mx-auto px-6 py-8">
+        <div class="bg-white rounded-3xl shadow-sm p-8 mb-8 border border-slate-100">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div class="flex flex-col space-y-4">
+                    <h2 class="text-sm font-black text-slate-500 tracking-widest flex items-center uppercase">
+                        <span class="w-2 h-2 bg-blue-500 rounded-full mr-2"></span>实时视频流
+                    </h2>
+                    <div class="video-container shadow-inner border border-slate-200">
+                        <img id="videoInput" alt="实时画面" style="width: 100%; height: auto; display: block;">
+                        <canvas id="overlayCanvas" class="overlay-canvas"></canvas>
+                    </div>
+                </div>
+
+                <div class="flex flex-col space-y-4">
+                    <h2 class="text-sm font-black text-slate-500 tracking-widest flex items-center uppercase">
+                        <span class="w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>基准图片显示画面
+                    </h2>
+                    <div class="video-container bg-slate-50 flex items-center justify-center border-2 border-dashed border-slate-300">
+                        <span id="basePlaceholder" class="text-slate-400 font-medium">暂无基准图片</span>
+                        <img id="baselinePreview" class="hidden rounded-lg" alt="基准图片" />
+                    </div>
+                    <label class="file-upload-btn text-center w-full bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 px-4 py-3 rounded-xl font-bold cursor-pointer transition shadow-sm">
+                        📁 读取电脑文件
+                        <input type="file" id="baselineFile" accept="image/*">
+                    </label>
+                </div>
+
+                <div class="flex flex-col space-y-4">
+                    <h2 class="text-sm font-black text-slate-500 tracking-widest flex items-center uppercase">
+                        <span class="w-2 h-2 bg-rose-500 rounded-full mr-2"></span>倾斜图片显示画面
+                    </h2>
+                    <div class="video-container bg-slate-50 flex items-center justify-center border-2 border-dashed border-slate-300">
+                        <span id="tiltPlaceholder" class="text-slate-400 font-medium">暂无倾斜图片</span>
+                        <img id="tiltPreview" class="hidden w-full h-full rounded-lg object-contain bg-white" alt="倾斜图片" />
+                    </div>
+                    <label class="file-upload-btn text-center w-full bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 px-4 py-3 rounded-xl font-bold cursor-pointer transition shadow-sm">
+                        📁 读取电脑文件
+                        <input type="file" id="tiltFile" accept="image/*">
+                    </label>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-8 pt-8 border-t border-slate-100">
+                <button onclick="startCamera()" class="flex items-center justify-center bg-slate-800 hover:bg-slate-900 text-white px-6 py-4 rounded-xl font-bold transition shadow-lg">📹 启动摄像头</button>
+                <button onclick="captureFrame()" class="flex items-center justify-center bg-blue-500 hover:bg-blue-600 text-white px-6 py-4 rounded-xl font-bold transition shadow-lg shadow-blue-500/30">📷 捕获帧</button>
+                <button onclick="setBaseline()" class="flex items-center justify-center bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-4 rounded-xl font-bold transition shadow-lg shadow-emerald-500/30">🎯 设为基准</button>
+                <button onclick="runAnalysis(event)" class="flex items-center justify-center bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-6 py-4 rounded-xl font-black transition shadow-xl shadow-indigo-500/40 transform hover:-translate-y-1">▶️ 运行</button>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div class="bg-white rounded-3xl shadow-sm p-6 border border-slate-100">
+                <h2 class="text-xl font-black text-slate-800 mb-4 flex items-center">
+                    <svg class="w-6 h-6 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5"></path></svg>
+                    3D 铁塔姿态分析
+                </h2>
+                <div id="tower3DContainer">
+                    <div id="angleOverlay" class="hidden">0.0°</div>
+                    <div class="absolute bottom-4 left-4 text-[10px] text-slate-300 font-medium bg-slate-900/50 backdrop-blur px-3 py-1.5 rounded-lg pointer-events-none">鼠标拖拽旋转视角 | 滚轮缩放</div>
+                </div>
+                <div class="flex justify-center space-x-8 mt-5 text-xs text-slate-600 font-bold uppercase tracking-wider">
+                    <div class="flex items-center"><span class="w-3 h-3 bg-emerald-500 rounded-full mr-2 shadow-sm"></span>初始垂直基准</div>
+                    <div class="flex items-center"><span class="w-3 h-3 bg-rose-500 rounded-full mr-2 shadow-sm"></span>当前倾斜方向</div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-3xl shadow-sm p-8 flex flex-col justify-between border border-slate-100">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-xl font-black text-slate-800 flex items-center">
+                        实时监测数据
+                    </h2>
+                    <div class="flex items-center bg-blue-50 px-4 py-2 rounded-xl border border-blue-100 shadow-inner">
+                        <label class="text-xs font-bold text-blue-600 mr-2 uppercase tracking-wide">初始方位角:</label>
+                        <input type="number" id="manualAzimuth" value="276" step="0.1" 
+                               class="w-16 bg-white border border-blue-200 rounded-md py-1 font-bold text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-400 text-center shadow-sm">
+                        <span class="text-blue-600 font-bold ml-1">°</span>
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-5 h-full">
+                    <div class="data-card bg-slate-50 p-6 rounded-2xl flex flex-col justify-center">
+                        <div class="text-[11px] font-black text-blue-500 uppercase tracking-widest mb-1">Pitch</div>
+                        <div class="text-slate-500 text-xs font-medium mb-3">俯仰角</div>
+                        <div class="text-4xl font-black text-slate-800" id="pitchValue">0.00°</div>
+                    </div>
+                    <div class="data-card bg-slate-50 p-6 rounded-2xl flex flex-col justify-center">
+                        <div class="text-[11px] font-black text-emerald-500 uppercase tracking-widest mb-1">Roll</div>
+                        <div class="text-slate-500 text-xs font-medium mb-3">翻滚角</div>
+                        <div class="text-4xl font-black text-slate-800" id="rollValue">0.00°</div>
+                    </div>
+                    <div class="data-card bg-slate-50 p-6 rounded-2xl flex flex-col justify-center border-l-4 border-l-orange-400">
+                        <div class="text-[11px] font-black text-orange-500 uppercase tracking-widest mb-1">Angle</div>
+                        <div class="text-slate-500 text-xs font-medium mb-3">倾斜角</div>
+                        <div class="text-4xl font-black text-slate-800" id="angleValue">0.00°</div>
+                    </div>
+                    <div class="data-card bg-slate-50 p-6 rounded-2xl flex flex-col justify-center border-l-4 border-l-rose-500">
+                        <div class="text-[11px] font-black text-rose-500 uppercase tracking-widest mb-1">Azimuth</div>
+                        <div class="text-slate-500 text-xs font-medium mb-3">绝对方位角</div>
+                        <div class="text-4xl font-black text-slate-800" id="azimuthValue">276.0°</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-8 bg-[#0f172a] rounded-3xl shadow-xl p-8 relative overflow-hidden border border-slate-800">
+            <h2 class="text-lg font-bold text-white mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                系统输出日志
+            </h2>
+            <div id="logContainer" class="h-32 overflow-y-auto text-emerald-400 font-mono text-xs space-y-1.5 scrollbar-hide">
+                <div class="opacity-80">[系统] 等待初始化...</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="settingsModal" class="fixed inset-0 bg-slate-900 bg-opacity-75 hidden items-center justify-center z-50 backdrop-blur-sm">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
+            <div class="bg-slate-100 px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                <h3 class="text-xl font-bold text-slate-800">系统参数设置</h3>
+                <button onclick="hideSettings()" class="text-gray-400 hover:text-red-500 transition"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+            </div>
+            <div class="p-6 space-y-5">
+                <div><label class="block text-sm font-semibold text-gray-700 mb-2">报警阈值 (度)</label><input type="number" id="alarmThreshold" step="0.1" value="2.0" class="w-full border border-gray-300 rounded-lg px-4 py-3 focus:ring-2 focus:ring-blue-500 bg-slate-50"></div>
+                <div class="pt-4 border-t border-gray-100"><button onclick="saveSettings()" class="w-full bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-xl font-bold shadow-md transition">💾 确认保存</button></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let scene, camera, renderer, controls;
+        let worldGroup, initArrow, tiltedTowerPivot, tiltedArrow;
+        let arcLine = null;
+        
+        let initialAzimuth = 276; 
+        let lastPitch = 0, lastRoll = 0, lastTotalTilt = 0;
+        let alarmThreshold = 2.0;
+        let alarmActive = false;
+        let backendOnline = false;
+        let capturedTiltBlob = null;
+        let capturedBaselineBlob = null;
+
+        function captureFrame() {
+            var img = document.getElementById('videoInput');
+            if (!img || !img.complete || img.naturalWidth === 0) {
+                addLog("[WARN] 视频流未就绪，请先启动摄像头");
+                return;
+            }
+            fetch('http://127.0.0.1:5000/capture_frame?' + new Date().getTime())
+                .then(res => res.blob())
+                .then(blob => {
+                    capturedTiltBlob = blob;
+                    var tiltImg = document.getElementById('tiltPreview');
+                    tiltImg.src = URL.createObjectURL(blob);
+                    tiltImg.classList.remove('hidden');
+                    document.getElementById('tiltPlaceholder').classList.add('hidden');
+                    addLog("[CAPTURE] 倾斜画面已捕获");
+                })
+                .catch(err => {
+                    addLog("[ERROR] 捕获倾斜帧失败，请确认后端已启动");
+                });
+        }
+
+        function setBaseline() {
+            var img = document.getElementById('videoInput');
+            if (!img || !img.complete || img.naturalWidth === 0) {
+                addLog("[WARN] 视频流未就绪，请先启动摄像头");
+                return;
+            }
+            fetch('http://127.0.0.1:5000/capture_frame?' + new Date().getTime())
+                .then(res => res.blob())
+                .then(blob => {
+                    capturedBaselineBlob = blob;
+                    var baseImg = document.getElementById('baselinePreview');
+                    baseImg.src = URL.createObjectURL(blob);
+                    baseImg.classList.remove('hidden');
+                    document.getElementById('basePlaceholder').classList.add('hidden');
+                    addLog("[BASELINE] 基准画面已设定");
+                })
+                .catch(err => {
+                    addLog("[ERROR] 捕获基准帧失败，请确认后端已启动");
+                });
+        }
+
+        function onOpenCVReady() { addLog('[OpenCV.js] 核心库加载完成'); }
+
+        // ==================== 1. Three.js 核心及 3D罗盘表盘 ====================
+        function init3D() {
+            const container = document.getElementById('tower3DContainer');
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+            camera.position.set(22, 18, 22);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            container.appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            // 地面网格
+            scene.add(new THREE.GridHelper(30, 30, 0x475569, 0x334155));
+
+            // ================= 3D 罗盘刻度与数字表盘 =================
+            const compassGroup = new THREE.Group();
+            const d2r = Math.PI / 180;
+            const tickMat = new THREE.LineBasicMaterial({ color: 0x64748b });
+            const majorTickMat = new THREE.LineBasicMaterial({ color: 0x3b82f6, linewidth: 2 });
+
+            for (let i = 0; i < 360; i += 5) {
+                const isMajor = i % 30 === 0;
+                // 内部的蓝色圆圈
+                const innerRad = 10;
+                // 刻度的长度：主刻度更长
+                const outerRad = isMajor ? 11.5 : 10.8;
+                
+                // Three.js坐标系：-Z是北(0度)，+X是东(90度)，+Z是南(180度)，-X是西(270度)
+                const x1 = Math.sin(i * d2r) * innerRad;
+                const z1 = -Math.cos(i * d2r) * innerRad;
+                const x2 = Math.sin(i * d2r) * outerRad;
+                const z2 = -Math.cos(i * d2r) * outerRad;
+
+                // 绘制一圈首尾相连的内环线
+                const nextX = Math.sin((i+5) * d2r) * innerRad;
+                const nextZ = -Math.cos((i+5) * d2r) * innerRad;
+                const ringGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1, 0, z1), new THREE.Vector3(nextX, 0, nextZ)]);
+                compassGroup.add(new THREE.Line(ringGeo, new THREE.LineBasicMaterial({ color: 0x3b82f6 })));
+
+                // 绘制向外延伸的刻度线
+                const tickGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1, 0, z1), new THREE.Vector3(x2, 0, z2)]);
+                compassGroup.add(new THREE.Line(tickGeo, isMajor ? majorTickMat : tickMat));
+
+                // 在主要的刻度外围添加度数文本
+                if (isMajor) {
+                    const labelRad = 13.5; 
+                    const lx = Math.sin(i * d2r) * labelRad;
+                    const lz = -Math.cos(i * d2r) * labelRad;
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 128; canvas.height = 64;
+                    const ctx = canvas.getContext('2d');
+                    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                    ctx.font = "bold 24px Arial, sans-serif";
+                    
+                    let text = i + "°";
+                    if (i === 0) { ctx.fillStyle = "#ef4444"; text = "N (0°)"; }
+                    else if (i === 90) { ctx.fillStyle = "#60a5fa"; text = "E (90°)"; }
+                    else if (i === 180) { ctx.fillStyle = "#60a5fa"; text = "S (180°)"; }
+                    else if (i === 270) { ctx.fillStyle = "#60a5fa"; text = "W (270°)"; }
+                    else { ctx.fillStyle = "#94a3b8"; }
+                    
+                    ctx.fillText(text, 64, 32);
+                    const tex = new THREE.CanvasTexture(canvas);
+                    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex }));
+                    sprite.position.set(lx, 0.5, lz);
+                    sprite.scale.set(4, 2, 1);
+                    compassGroup.add(sprite);
+                }
+            }
+            scene.add(compassGroup);
+
+            // ================= 双箭头逻辑替代铁塔 =================
+            worldGroup = new THREE.Group();
+            scene.add(worldGroup);
+
+            // 1. 初始状态的垂直箭头 (绿色，表示完美的初始安装)
+            initArrow = new THREE.ArrowHelper(
+                new THREE.Vector3(0, 1, 0),
+                new THREE.Vector3(0, 0, 0),
+                12, 0x10b981, 2, 1.2
+            );
+            worldGroup.add(initArrow);
+
+            // 2. 当前倾斜状态的箭头 (红色)
+            tiltedTowerPivot = new THREE.Group();
+            tiltedArrow = new THREE.ArrowHelper(
+                new THREE.Vector3(0, 1, 0),
+                new THREE.Vector3(0, 0, 0),
+                12, 0xf43f5e, 2, 1.2
+            );
+            tiltedTowerPivot.add(tiltedArrow);
+            worldGroup.add(tiltedTowerPivot);
+
+            // 灯光
+            scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+            const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+            sun.position.set(10, 20, 10);
+            scene.add(sun);
+            
+            window.addEventListener('resize', () => {
+                camera.aspect = container.clientWidth / container.clientHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(container.clientWidth, container.clientHeight);
+            });
+
+            updateTower3D(0, 0, initialAzimuth, 0);
+            animate3D();
+        }
+
+        // ==================== 2. 精确映射世界坐标系与夹角 ====================
+        function updateTower3D(pitch, roll, initAzim, totalTilt) {
+            const d2r = Math.PI / 180;
+            
+            // 旋转整个局部坐标系，让它的局部正前方对准罗盘上填入的方位角
+            worldGroup.rotation.y = -initAzim * d2r;
+
+            // 根据算出的俯仰和横滚，驱动红箭头发生物理倒伏
+            tiltedTowerPivot.rotation.set(-pitch * d2r, 0, -roll * d2r, 'ZYX');
+
+            // 绘制两个箭头之间的橙色弧线和悬浮角度度数
+            if(arcLine) { scene.remove(arcLine); arcLine = null; }
+            const overlay = document.getElementById('angleOverlay');
+            
+            if(totalTilt > 0.1) {
+                const points = [];
+                const radius = 9; // 在高度 9 的地方画一道弧线
+                
+                // 计算红色箭头倾倒后的实际三维方向
+                const targetDir = new THREE.Vector3(0, 1, 0);
+                targetDir.applyEuler(tiltedTowerPivot.rotation);
+                
+                // 算出旋转轴
+                const up = new THREE.Vector3(0, 1, 0);
+                const axis = new THREE.Vector3().crossVectors(up, targetDir).normalize();
+                const angle = up.angleTo(targetDir);
+                
+                // 生成弧线点位
+                for(let i=0; i<=20; i++) {
+                    const pt = new THREE.Vector3(0, radius, 0);
+                    pt.applyAxisAngle(axis, angle * (i/20));
+                    pt.applyEuler(worldGroup.rotation); // 转换回世界坐标
+                    points.push(pt);
+                }
+                
+                arcLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({color: 0xfcd34d, linewidth: 3}));
+                scene.add(arcLine);
+                
+                overlay.innerText = totalTilt.toFixed(2) + '°';
+                overlay.classList.remove('hidden');
+                
+                // 计算弧线中点，给 animate3D 实时更新 HTML 标签位置用
+                window.midArcPoint = new THREE.Vector3(0, radius, 0);
+                window.midArcPoint.applyAxisAngle(axis, angle / 2);
+                window.midArcPoint.applyEuler(worldGroup.rotation);
+            } else {
+                overlay.classList.add('hidden');
+                window.midArcPoint = null;
+            }
+        }
+
+        function animate3D() {
+            requestAnimationFrame(animate3D);
+            controls.update();
+            
+            // 实时将 3D 空间的中点投影到 2D 屏幕上，让度数标签始终悬浮在两个箭头中间
+            if(window.midArcPoint && !document.getElementById('angleOverlay').classList.contains('hidden')) {
+                const pos = window.midArcPoint.clone();
+                pos.project(camera);
+                const container = document.getElementById('tower3DContainer');
+                const x = (pos.x * .5 + .5) * container.clientWidth;
+                const y = (pos.y * -.5 + .5) * container.clientHeight;
+                const overlay = document.getElementById('angleOverlay');
+                overlay.style.left = `${x}px`;
+                overlay.style.top = `${y}px`;
+            }
+            
+            renderer.render(scene, camera);
+        }
+
+        // ==================== 3. 业务通信逻辑 ====================
+        async function runAnalysis(e) {
+            let btn = e.target.closest('button');
+            if(!btn) return;
+            const userInitAzimuth = parseFloat(document.getElementById('manualAzimuth').value);
+
+            if (!capturedBaselineBlob || !capturedTiltBlob) return alert("操作提示：请先点击「设为基准」和「捕获帧」获取图像！");
+
+            const originalHTML = btn.innerHTML;
+            btn.disabled = true; 
+            btn.innerHTML = `<span class="animate-spin mr-2">⚙️</span> 正在高速解算中...`;
+            addLog("[PROCESS] 构建图像张量并发送至核心引擎...");
+
+            const formData = new FormData();
+            formData.append('baseline', capturedBaselineBlob, 'baseline.jpg');
+            formData.append('tilt', capturedTiltBlob, 'tilt.jpg');
+            formData.append('initial_yaw_deg', userInitAzimuth);
+
+            try {
+                const response = await fetch('http://127.0.0.1:5000/analyze', { method: 'POST', body: formData });
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('pitchValue').innerText = (data.pitch > 0 ? '+' : '') + data.pitch.toFixed(3) + "°";
+                    document.getElementById('rollValue').innerText = (data.roll > 0 ? '+' : '') + data.roll.toFixed(3) + "°";
+                    document.getElementById('angleValue').innerText = data.total_tilt.toFixed(3) + "°";
+                    document.getElementById('azimuthValue').innerText = data.azimuth.toFixed(2) + "°";
+
+                    lastPitch = data.pitch;
+                    lastRoll = data.roll;
+                    lastTotalTilt = data.total_tilt;
+
+                    updateTower3D(data.pitch, data.roll, userInitAzimuth, data.total_tilt);
+
+                    checkAlarm(data.total_tilt);
+
+                    addLog(`[SUCCESS] 姿态重建完毕！绝对偏转: ${data.direction_desc}方向 ${data.total_tilt.toFixed(2)}°`);
+                } else {
+                    addLog(`[ERROR] 解算异常: ${data.error}`);
+                    alert("引擎返回错误：" + data.error);
+                }
+            } catch (err) {
+                addLog('[FATAL] 连接拒绝。请检查本地端口 5000 (python app.py) 是否开启。');
+                alert("无法连接到后端算法服务！");
+            } finally {
+                btn.disabled = false; 
+                btn.innerHTML = originalHTML;
+            }
+        }
+
+        function checkAlarm(totalTilt) {
+            var light = document.getElementById('alarmLight');
+            var text = document.getElementById('alarmText');
+            var box = document.getElementById('alarmBox');
+            if (totalTilt > alarmThreshold) {
+                alarmActive = true;
+                light.className = 'status-indicator alarm-flash';
+                text.innerText = '倾斜报警! ' + totalTilt.toFixed(2) + '°';
+                text.className = 'text-sm font-bold tracking-wider text-red-400';
+                box.className = 'flex items-center space-x-3 bg-red-900/50 backdrop-blur px-4 py-2 rounded-full border border-red-500';
+                addLog('[ALARM] ⚠️ 倾斜角超过阈值! 当前: ' + totalTilt.toFixed(2) + '° > 阈值: ' + alarmThreshold + '°');
+            } else {
+                alarmActive = false;
+                light.className = 'status-indicator status-normal';
+                text.innerText = '无报警';
+                text.className = 'text-sm font-bold tracking-wider text-slate-400';
+                box.className = 'flex items-center space-x-3 bg-slate-800/80 backdrop-blur px-4 py-2 rounded-full border border-slate-700';
+            }
+        }
+
+        function addLog(m) { 
+            // 【极其重要的修复】：将 logBox 修正为真实存在的 HTML ID logContainer
+            const c = document.getElementById('logContainer'); 
+            if(!c) return;
+            const d = document.createElement('div'); 
+            d.innerHTML = `<span class="opacity-50">[${new Date().toLocaleTimeString('en-US', {hour12: false})}]</span> ${m}`; 
+            c.appendChild(d); 
+            c.scrollTop = c.scrollHeight; 
+        }
+
+        function setupFilePreview(inputId, imgId, labelId, blobVar) {
+            document.getElementById(inputId).addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    if (blobVar === 'baseline') capturedBaselineBlob = file;
+                    else if (blobVar === 'tilt') capturedTiltBlob = file;
+
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        const img = document.getElementById(imgId);
+                        img.src = event.target.result;
+                        img.classList.remove('hidden');
+                        document.getElementById(labelId).classList.add('hidden');
+                        addLog(`[I/O] 图像装载成功: ${file.name}`);
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+
+        function startCamera() {
+            // 1. 获取图片元素 (不再是 video)
+            var img = document.getElementById('videoInput');
+
+            // 2. 生成时间戳，防止浏览器缓存
+            var timestamp = new Date().getTime();
+
+            // 3. 直接设置图片的 src 属性
+            // 浏览器看到 src 变了，会自动去下载新图片
+            // MJPEG 流会不断更新这张"图片"
+            img.src = "http://localhost:5000/video_feed?t" + timestamp;
+
+            // 4. 可选：添加加载状态提示
+            console.log("正在加载视频流...");
+        }
+
+        function showSettings() {
+            document.getElementById('settingsModal').classList.remove('hidden');
+            document.getElementById('settingsModal').classList.add('flex');
+        }
+
+        function hideSettings() {
+            document.getElementById('settingsModal').classList.add('hidden');
+            document.getElementById('settingsModal').classList.remove('flex');
+        }
+
+        function saveSettings() {
+            var newThreshold = parseFloat(document.getElementById('alarmThreshold').value);
+            if (!isNaN(newThreshold) && newThreshold >= 0) {
+                alarmThreshold = newThreshold;
+                addLog("[CONFIG] 报警阈值已更新为: " + alarmThreshold + "°");
+            }
+            hideSettings();
+        }
+
+        function checkBackendHealth() {
+            fetch('http://127.0.0.1:5000/health')
+                .then(function(res) { return res.json(); })
+                .then(function(data) {
+                    if (data.status === 'ok') {
+                        backendOnline = true;
+                        document.getElementById('systemStatus').className = 'status-indicator status-normal';
+                        document.getElementById('statusText').innerText = '系统就绪';
+                    }
+                })
+                .catch(function() {
+                    backendOnline = false;
+                    document.getElementById('systemStatus').className = 'status-indicator status-danger';
+                    document.getElementById('statusText').innerText = '等待后端';
+                });
+        }
+
+        window.onload = () => {
+            init3D();
+            setupFilePreview('baselineFile', 'baselinePreview', 'basePlaceholder', 'baseline');
+            setupFilePreview('tiltFile', 'tiltPreview', 'tiltPlaceholder', 'tilt');
+            
+            checkBackendHealth();
+            setInterval(checkBackendHealth, 3000);
+            
+            document.getElementById('manualAzimuth').addEventListener('change', (e) => {
+                const val = parseFloat(e.target.value);
+                if(!isNaN(val)) {
+                    initialAzimuth = val;
+                    // 修复参数不匹配的问题
+                    updateTower3D(lastPitch, lastRoll, val, lastTotalTilt);
+                    addLog(`[CONFIG] 初始方位角更新为: ${val}°`);
+                }
+            });
+        };
+    </script>
+</body>
+</html>
